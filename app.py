@@ -50,7 +50,7 @@ class App:
     def __init__(self, root):
         self.root = root
         self.root.title("XyeBus 报文模拟上位机")
-        self.root.geometry("1100x700")
+        self.root.geometry("1180x700")
         self.root.minsize(850, 520)
         self.source = Path(__file__).with_name("0907智谷-feiyi室内外机报文.txt")
         self.frames = []
@@ -77,6 +77,11 @@ class App:
         self.port_box.pack(side="left")
         ttk.Button(top, text="刷新串口", command=self.refresh_ports).pack(side="left", padx=5)
         ttk.Label(top, text="4800  8N1").pack(side="left", padx=8)
+        ttk.Label(top, text="发送条数:").pack(side="left", padx=(12, 3))
+        self.limit_var = tk.StringVar(value="1")
+        self.limit_box = tk.Spinbox(top, from_=1, to=1, textvariable=self.limit_var,
+                                    width=8)
+        self.limit_box.pack(side="left")
         self.start_btn = ttk.Button(top, text="开始发送", command=self.start)
         self.start_btn.pack(side="left", padx=(15, 3))
         self.stop_btn = ttk.Button(top, text="停止发送", command=self.pause, state="disabled")
@@ -97,6 +102,7 @@ class App:
     def make_log(self, parent, title):
         frame = ttk.Labelframe(parent, text=title, padding=5)
         text = tk.Text(frame, wrap="none", font=("Consolas", 9), state="disabled")
+        text.tag_configure("interval", foreground="red")
         scroll = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
         text.configure(yscrollcommand=scroll.set)
         text.pack(side="left", fill="both", expand=True)
@@ -104,9 +110,12 @@ class App:
         parent.add(frame, weight=1)
         return text
 
-    def log(self, widget, value):
+    def log(self, widget, value, tag=None):
         widget.configure(state="normal")
-        widget.insert("end", value + "\n")
+        if tag:
+            widget.insert("end", value + "\n", tag)
+        else:
+            widget.insert("end", value + "\n")
         widget.see("end")
         widget.configure(state="disabled")
 
@@ -114,6 +123,8 @@ class App:
         try:
             self.frames = load_frames(path)
             self.file_var.set(str(path))
+            self.limit_box.configure(from_=1, to=len(self.frames))
+            self.limit_var.set(len(self.frames))
             self.count_var.set(f"共 {len(self.frames)} 条")
             self.log(self.pending, f"已加载 {len(self.frames)} 条报文")
         except Exception as exc:
@@ -154,6 +165,24 @@ class App:
         self.pause_event.set()
         self.pending.configure(state="normal"); self.pending.delete("1.0", "end"); self.pending.configure(state="disabled")
         self.sent.configure(state="normal"); self.sent.delete("1.0", "end"); self.sent.configure(state="disabled")
+        try:
+            requested_limit = int(self.limit_var.get())
+        except (TypeError, ValueError):
+            messagebox.showwarning("发送条数无效", f"请输入 1 到 {len(self.frames)} 之间的整数")
+            return
+        if not 1 <= requested_limit <= len(self.frames):
+            messagebox.showwarning("发送条数无效", f"请输入 1 到 {len(self.frames)} 之间的整数")
+            self.limit_var.set(min(max(1, requested_limit), len(self.frames)))
+            return
+        self.send_limit = requested_limit
+        # 固定显示本次任务的原始抓包数据，发送过程中不再修改此窗口。
+        selected_frames = self.frames[:self.send_limit]
+        for frame_index, (_, _, raw, stamp) in enumerate(selected_frames):
+            self.log(self.pending, f"[{stamp:%Y-%m-%d %H:%M:%S.%f}] {raw}")
+            if frame_index + 1 < self.send_limit:
+                interval_ms = (selected_frames[frame_index + 1][3] - stamp).total_seconds() * 1000
+                self.log(self.pending, f"[{interval_ms:.3f} ms]", "interval")
+        self.last_actual_stamp = None
         self.worker = threading.Thread(target=self.send_loop, daemon=True)
         self.worker.start()
         self.start_btn.configure(text="继续发送")
@@ -170,7 +199,8 @@ class App:
 
     def send_loop(self):
         base = time.monotonic()
-        for index, (delay, payload, raw, stamp) in enumerate(self.frames):
+        selected_frames = self.frames[:self.send_limit]
+        for index, (delay, payload, raw, stamp) in enumerate(selected_frames):
             while not self.stop_event.is_set() and not self.pause_event.wait(0.05):
                 pass
             while not self.stop_event.is_set():
@@ -186,7 +216,8 @@ class App:
             except Exception as exc:
                 self.events.put(("error", str(exc)))
                 return
-            self.events.put(("sent", index, raw, stamp))
+            actual_stamp = dt.datetime.now()
+            self.events.put(("sent", index, raw, stamp, actual_stamp))
         self.events.put(("done",))
 
     def process_events(self):
@@ -194,11 +225,12 @@ class App:
             while True:
                 event = self.events.get_nowait()
                 if event[0] == "sent":
-                    _, index, raw, stamp = event
-                    self.log(self.sent, f"[{stamp:%Y-%m-%d %H:%M:%S.%f}][{index + 1}/{len(self.frames)}] {raw}")
-                    if index + 1 < len(self.frames):
-                        next_stamp = self.frames[index + 1][3]
-                        self.log(self.pending, f"[{next_stamp:%Y-%m-%d %H:%M:%S.%f}] {self.frames[index + 1][2]}")
+                    _, index, raw, stamp, actual_stamp = event
+                    self.log(self.sent, f"[{actual_stamp:%Y-%m-%d %H:%M:%S.%f}][{index + 1}/{self.send_limit}] {raw}")
+                    if self.last_actual_stamp is not None:
+                        interval_ms = (actual_stamp - self.last_actual_stamp).total_seconds() * 1000
+                        self.log(self.sent, f"[{interval_ms:.3f} ms]", "interval")
+                    self.last_actual_stamp = actual_stamp
                 elif event[0] == "error":
                     messagebox.showerror("发送失败", event[1]); self.finish()
                 elif event[0] == "done":
