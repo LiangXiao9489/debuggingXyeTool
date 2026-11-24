@@ -226,10 +226,10 @@ class App:
                 event = self.events.get_nowait()
                 if event[0] == "sent":
                     _, index, raw, stamp, actual_stamp = event
-                    self.log(self.sent, f"[{actual_stamp:%Y-%m-%d %H:%M:%S.%f}][{index + 1}/{self.send_limit}] {raw}")
                     if self.last_actual_stamp is not None:
                         interval_ms = (actual_stamp - self.last_actual_stamp).total_seconds() * 1000
                         self.log(self.sent, f"[{interval_ms:.3f} ms]", "interval")
+                    self.log(self.sent, f"[{actual_stamp:%Y-%m-%d %H:%M:%S.%f}][{index + 1}/{self.send_limit}] {raw}")
                     self.last_actual_stamp = actual_stamp
                 elif event[0] == "error":
                     messagebox.showerror("发送失败", event[1]); self.finish()
